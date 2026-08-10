@@ -469,6 +469,16 @@
               <FileType>1</FileType>
               <FilePath>../Src/protocol.c</FilePath>
             </File>
+            <File>
+              <FileName>sht30.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Src/sht30.c</FilePath>
+            </File>
+            <File>
+              <FileName>flash_param.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Src/flash_param.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

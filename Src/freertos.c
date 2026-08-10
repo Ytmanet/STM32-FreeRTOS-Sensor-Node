@@ -31,6 +31,8 @@
 #include "usart.h"
 #include "ringbuf.h"
 #include "protocol.h"
+#include "sht30.h"
+#include "flash_param.h"
 
 /* USER CODE END Includes */
 
@@ -56,6 +58,8 @@ typedef struct
 {
     uint16_t adc_raw;   /* ADC 原始值 0~4095 */
     uint16_t adc_mv;    /* 换算后的电压, 单位 mV */
+    int16_t  temp_x10;  /* 温度 ×10, 256 = 25.6°C; 0x7FFF = 无效 */
+    int16_t  humi_x10;  /* 湿度 ×10, 600 = 60.0%; 0x7FFF = 无效 */
 } SensorData;
 
 volatile uint16_t g_sample_interval_ms = 200;   /* 采样周期, 可被串口命令修改 */
@@ -177,6 +181,21 @@ void StartUARTTask(void *argument)
 
   proto_init(&parser);
   uart1_rx_start();   /* 启动 DMA 循环接收 + IDLE 中断 */
+
+  /* 开机加载掉电保存的参数, 没有则用默认值 */
+  {
+      uint16_t id, interval;
+      if (flash_param_load(&id, &interval) == 0)
+      {
+          g_device_id = (uint8_t)id;
+          g_sample_interval_ms = interval;
+          printf("params loaded: ID=%u interval=%ums\r\n", (unsigned)id, (unsigned)interval);
+      }
+      else
+      {
+          printf("params default: ID=1 interval=200ms\r\n");
+      }
+  }
   printf("Proto v1 up: use HEX mode. Frames: AA ID CMD LEN DATA CRC16\r\n");
 
   /* Infinite loop */
@@ -205,15 +224,19 @@ void StartUARTTask(void *argument)
     /* 2. 传感器数据 -> CMD 0x01 上报帧 (DATA: adc_mv 高/低 + adc_raw 高/低) */
     if (osMessageQueueGet(q_sensor2uartHandle, &rx_data, NULL, 50) == osOK)
     {
-        uint8_t payload[4];
+        uint8_t payload[8];
         uint16_t n;
 
         payload[0] = (uint8_t)(rx_data.adc_mv >> 8);
         payload[1] = (uint8_t)(rx_data.adc_mv & 0xFF);
         payload[2] = (uint8_t)(rx_data.adc_raw >> 8);
         payload[3] = (uint8_t)(rx_data.adc_raw & 0xFF);
+        payload[4] = (uint8_t)(rx_data.temp_x10 >> 8);
+        payload[5] = (uint8_t)(rx_data.temp_x10 & 0xFF);
+        payload[6] = (uint8_t)(rx_data.humi_x10 >> 8);
+        payload[7] = (uint8_t)(rx_data.humi_x10 & 0xFF);
 
-        n = proto_build(g_device_id, PROTO_CMD_REPORT, payload, 4, tx_buf);
+        n = proto_build(g_device_id, PROTO_CMD_REPORT, payload, 8, tx_buf);
         HAL_UART_Transmit(&huart1, tx_buf, n, 100);
     }
   }
@@ -250,6 +273,13 @@ void StartSensorTask(void *argument)
     /* 换算电压: 12位ADC, 3.3V 参考电压 */
     tx_data.adc_mv = (uint16_t)((uint32_t)tx_data.adc_raw * 3300UL / 4095UL);
 
+    /* 读 SHT30 温湿度; 没接模块会失败, 填无效值 0x7FFF */
+    if (sht30_read(&tx_data.temp_x10, &tx_data.humi_x10) != 0)
+    {
+        tx_data.temp_x10 = 0x7FFF;
+        tx_data.humi_x10 = 0x7FFF;
+    }
+
     /* 发给 UART 任务; 队列满则阻塞等待(背压, 自动限流) */
     osMessageQueuePut(q_sensor2uartHandle, &tx_data, 0, osWaitForever);
 
@@ -285,26 +315,41 @@ static void proto_handle_cmd(ProtoParser *p, uint8_t *tx_buf)
     uint8_t len = 0;
     uint16_t n;
 
+    /* ID 不匹配的帧直接忽略 (一主多从总线上只处理发给自己的帧) */
+    if (p->id != g_device_id)
+    {
+        return;
+    }
+
     switch (p->cmd)
     {
         case PROTO_CMD_SET_PARAM:               /* 0x02: 设置参数 */
         {
             uint8_t status = 0;                 /* 0=成功, 1=参数无效 */
+            int need_save = 0;
 
             if (p->data_len >= 1)
             {
                 if ((p->data[0] == PROTO_PARAM_INTERVAL) && (p->data_len >= 3))
                 {
                     g_sample_interval_ms = (uint16_t)((p->data[1] << 8) | p->data[2]);
+                    need_save = 1;
                 }
                 else if ((p->data[0] == PROTO_PARAM_DEVID) && (p->data_len >= 2))
                 {
                     g_device_id = p->data[1];
+                    need_save = 1;
                 }
                 else
                 {
                     status = 1;
                 }
+
+                if (need_save)
+                {
+                    flash_param_save(g_device_id, g_sample_interval_ms);   /* 掉电保存 */
+                }
+
                 reply_data[0] = p->data[0];
                 reply_data[1] = status;
                 len = 2;
