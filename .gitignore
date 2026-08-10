@@ -1,0 +1,29 @@
+# ===== Keil / ARMCC 编译产物 =====
+*.o
+*.d
+*.crf
+*.axf
+*.hex
+*.lnp
+*.map
+*.sct
+*.dep
+*.htm
+*.build_log.htm
+*.uvguix.*
+*.uvoptx
+*.uvoptx.bak
+*.lst
+Output/
+build/
+
+# ===== IDE / 工具缓存 =====
+.vscode/
+.eide/
+.cmsis/
+DebugConfig/
+
+# ===== 其他 =====
+*.bak
+Thumbs.db
+.DS_Store
