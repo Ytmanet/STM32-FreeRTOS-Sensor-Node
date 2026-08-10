@@ -87,7 +87,7 @@ const osThreadAttr_t Sensor_Task_attributes = {
 osThreadId_t Display_TaskHandle;
 const osThreadAttr_t Display_Task_attributes = {
   .name = "Display_Task",
-  .stack_size = 256 * 4,
+  .stack_size = 512 * 4,
   .priority = (osPriority_t) osPriorityBelowNormal1,
 };
 /* Definitions for q_sensor2uart */
@@ -303,40 +303,80 @@ void StartDisplayTask(void *argument)
 {
   /* USER CODE BEGIN StartDisplayTask */
   SensorData disp;
-  char line[40];
+  char buf[20];
+  int16_t last_temp = 0x7FFF, last_humi = 0x7FFF;
+  uint16_t last_adc = 0xFFFF, last_id = 0xFFFF, last_rate = 0xFFFF;
 
   lcd_init();                 /* 初始化 LCD (含上电延时, 只执行一次) */
   lcd_clear(WHITE);           /* 清屏 */
+
+  /* ===== 静态界面: 边框/标题/标签只画一次, 之后只刷新数值 ===== */
+  lcd_draw_rectangle(6, 6, 233, 313, GRAY);            /* 边框 */
+  lcd_show_string(16, 12, 200, 16, 16, "STM32 Sensor Node", RED);
+  lcd_draw_hline(16, 36, 208, GRAY);                   /* 分隔线 */
+
+  lcd_show_string(16, 48, 70, 16, 16, "Temp:", BLACK);
+  lcd_show_string(16, 80, 70, 16, 16, "Humi:", BLACK);
+  lcd_show_string(16, 112, 70, 16, 16, "ADC:", BLACK);
+  lcd_show_string(16, 144, 70, 16, 16, "ID:", BLACK);
+  lcd_show_string(16, 176, 70, 16, 16, "Rate:", BLACK);
 
   /* Infinite loop */
   for(;;)
   {
     if (osMessageQueueGet(q_sensor2displayHandle, &disp, NULL, osWaitForever) == osOK)
     {
-        /* 先擦掉旧文字区域, 再写新内容 (避免残影) */
-        lcd_fill(20, 40, 300, 55, WHITE);
-        lcd_fill(20, 80, 300, 95, WHITE);
-        lcd_fill(20, 120, 300, 135, WHITE);
-        lcd_fill(20, 160, 300, 175, WHITE);
+        /* 温度: 值变化才刷新 (SHT30 变化很慢, 不会频繁刷屏) */
+        if (disp.temp_x10 != last_temp)
+        {
+            if (disp.temp_x10 != 0x7FFF)
+                sprintf(buf, "%d.%d C", disp.temp_x10 / 10,
+                        (disp.temp_x10 % 10 < 0) ? -(disp.temp_x10 % 10) : (disp.temp_x10 % 10));
+            else
+                strcpy(buf, "N/A");
+            lcd_fill(90, 48, 228, 63, WHITE);          /* 只擦数值区 */
+            lcd_show_string(90, 48, 138, 16, 16, buf, BLUE);
+            last_temp = disp.temp_x10;
+        }
 
-        if (disp.temp_x10 != 0x7FFF)
-            sprintf(line, "Temp: %d.%d C", disp.temp_x10 / 10,
-                    (disp.temp_x10 % 10 < 0) ? -(disp.temp_x10 % 10) : (disp.temp_x10 % 10));
-        else
-            strcpy(line, "Temp: N/A");
-        lcd_show_string(20, 40, 280, 16, 16, line, BLACK);
+        /* 湿度 */
+        if (disp.humi_x10 != last_humi)
+        {
+            if (disp.humi_x10 != 0x7FFF)
+                sprintf(buf, "%d.%d %%", disp.humi_x10 / 10, disp.humi_x10 % 10);
+            else
+                strcpy(buf, "N/A");
+            lcd_fill(90, 80, 228, 95, WHITE);
+            lcd_show_string(90, 80, 138, 16, 16, buf, BLUE);
+            last_humi = disp.humi_x10;
+        }
 
-        if (disp.humi_x10 != 0x7FFF)
-            sprintf(line, "Humi: %d.%d %%", disp.humi_x10 / 10, disp.humi_x10 % 10);
-        else
-            strcpy(line, "Humi: N/A");
-        lcd_show_string(20, 80, 280, 16, 16, line, BLACK);
+        /* ADC: 变化超过 20mV 才刷新 (死区, 避免悬空时乱跳刷屏) */
+        if ((disp.adc_mv > last_adc) ? (disp.adc_mv - last_adc >= 20) : (last_adc - disp.adc_mv >= 20))
+        {
+            sprintf(buf, "%u mV", (unsigned)disp.adc_mv);
+            lcd_fill(90, 112, 228, 127, WHITE);
+            lcd_show_string(90, 112, 138, 16, 16, buf, BLUE);
+            last_adc = disp.adc_mv;
+        }
 
-        sprintf(line, "ADC: %u mV", (unsigned)disp.adc_mv);
-        lcd_show_string(20, 120, 280, 16, 16, line, BLACK);
+        /* 设备 ID */
+        if ((uint16_t)g_device_id != last_id)
+        {
+            sprintf(buf, "%u", (unsigned)g_device_id);
+            lcd_fill(90, 144, 228, 159, WHITE);
+            lcd_show_string(90, 144, 138, 16, 16, buf, BLUE);
+            last_id = g_device_id;
+        }
 
-        sprintf(line, "ID: %u", (unsigned)g_device_id);
-        lcd_show_string(20, 160, 280, 16, 16, line, BLACK);
+        /* 采样周期 */
+        if (g_sample_interval_ms != last_rate)
+        {
+            sprintf(buf, "%u ms", (unsigned)g_sample_interval_ms);
+            lcd_fill(90, 176, 228, 191, WHITE);
+            lcd_show_string(90, 176, 138, 16, 16, buf, BLUE);
+            last_rate = g_sample_interval_ms;
+        }
     }
   }
   /* USER CODE END StartDisplayTask */
