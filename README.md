@@ -9,6 +9,9 @@
 通过 I2C 读取 SHT30 温湿度、ADC 采集模拟电压，数据经自定义协议帧（DMA + IDLE + CRC16）
 与上位机交互，参数掉电保存于内部 Flash，并实时显示在 TFTLCD 上。
 
+工程框架由 STM32CubeMX 生成（HAL 库），任务调度、协议状态机、环形缓冲、CRC16、
+传感器驱动与 LCD 移植等应用层代码均为手写。
+
 ## 功能特性
 
 - **三任务 + 队列解耦**：Sensor / UART_Protocol / Display 三个任务，数据经消息队列传递
