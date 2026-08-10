@@ -177,7 +177,7 @@ void StartUARTTask(void *argument)
 
   proto_init(&parser);
   uart1_rx_start();   /* 启动 DMA 循环接收 + IDLE 中断 */
-  printf("Protocol ready: CMD 0x02=set param, 0x03=query\r\n");
+  printf("Proto v1 up: use HEX mode. Frames: AA ID CMD LEN DATA CRC16\r\n");
 
   /* Infinite loop */
   for(;;)
@@ -215,8 +215,6 @@ void StartUARTTask(void *argument)
 
         n = proto_build(g_device_id, PROTO_CMD_REPORT, payload, 4, tx_buf);
         HAL_UART_Transmit(&huart1, tx_buf, n, 100);
-
-        printf("ADC: %u mV (raw %u)\r\n", rx_data.adc_mv, rx_data.adc_raw);   /* 人眼调试 */
     }
   }
   /* USER CODE END StartUARTTask */
