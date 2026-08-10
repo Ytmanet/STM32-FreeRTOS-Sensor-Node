@@ -84,7 +84,7 @@ FreeRTOS_Project/
 ├── Middlewares/    # FreeRTOS 内核
 ├── Drivers/        # HAL 库 + CMSIS
 ├── MDK-ARM/        # Keil 工程
-└── docs/           # 项目复盘 + 面试问答文档
+└── README.md       # 项目说明
 ```
 
 ## 快速开始
