@@ -27,12 +27,14 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
+#include <string.h>
 #include "adc.h"
 #include "usart.h"
 #include "ringbuf.h"
 #include "protocol.h"
 #include "sht30.h"
 #include "flash_param.h"
+#include "lcd.h"
 
 /* USER CODE END Includes */
 
@@ -282,6 +284,8 @@ void StartSensorTask(void *argument)
 
     /* 发给 UART 任务; 队列满则阻塞等待(背压, 自动限流) */
     osMessageQueuePut(q_sensor2uartHandle, &tx_data, 0, osWaitForever);
+    /* 同时发给显示任务 */
+    osMessageQueuePut(q_sensor2displayHandle, &tx_data, 0, osWaitForever);
 
     osDelay(g_sample_interval_ms);   /* 采样周期, 可被 CMD 0x02 修改 */
   }
@@ -298,10 +302,42 @@ void StartSensorTask(void *argument)
 void StartDisplayTask(void *argument)
 {
   /* USER CODE BEGIN StartDisplayTask */
+  SensorData disp;
+  char line[40];
+
+  lcd_init();                 /* 初始化 LCD (含上电延时, 只执行一次) */
+  lcd_clear(WHITE);           /* 清屏 */
+
   /* Infinite loop */
   for(;;)
   {
-    osDelay(1);
+    if (osMessageQueueGet(q_sensor2displayHandle, &disp, NULL, osWaitForever) == osOK)
+    {
+        /* 先擦掉旧文字区域, 再写新内容 (避免残影) */
+        lcd_fill(20, 40, 300, 55, WHITE);
+        lcd_fill(20, 80, 300, 95, WHITE);
+        lcd_fill(20, 120, 300, 135, WHITE);
+        lcd_fill(20, 160, 300, 175, WHITE);
+
+        if (disp.temp_x10 != 0x7FFF)
+            sprintf(line, "Temp: %d.%d C", disp.temp_x10 / 10,
+                    (disp.temp_x10 % 10 < 0) ? -(disp.temp_x10 % 10) : (disp.temp_x10 % 10));
+        else
+            strcpy(line, "Temp: N/A");
+        lcd_show_string(20, 40, 280, 16, 16, line, BLACK);
+
+        if (disp.humi_x10 != 0x7FFF)
+            sprintf(line, "Humi: %d.%d %%", disp.humi_x10 / 10, disp.humi_x10 % 10);
+        else
+            strcpy(line, "Humi: N/A");
+        lcd_show_string(20, 80, 280, 16, 16, line, BLACK);
+
+        sprintf(line, "ADC: %u mV", (unsigned)disp.adc_mv);
+        lcd_show_string(20, 120, 280, 16, 16, line, BLACK);
+
+        sprintf(line, "ID: %u", (unsigned)g_device_id);
+        lcd_show_string(20, 160, 280, 16, 16, line, BLACK);
+    }
   }
   /* USER CODE END StartDisplayTask */
 }
