@@ -157,6 +157,50 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* uartHandle)
 }
 
 /* USER CODE BEGIN 1 */
+#include "ringbuf.h"
+
+#define UART1_RX_BUF_SIZE   256
+
+uint8_t  uart1_rx_buf[UART1_RX_BUF_SIZE];       /* DMA 循环搬运的目标缓冲 */
+RingBuf  uart1_rx_ring;                          /* 任务侧读取的环形缓冲 */
+static volatile uint16_t uart1_rx_pos = 0;       /* DMA 缓冲中已处理到的位置(仅中断内使用) */
+
+/**
+ * @brief 启动 USART1 的 DMA 循环接收, 并开启 IDLE 中断
+ */
+void uart1_rx_start(void)
+{
+    rb_init(&uart1_rx_ring);
+    HAL_UART_Receive_DMA(&huart1, uart1_rx_buf, UART1_RX_BUF_SIZE);
+    __HAL_UART_ENABLE_IT(&huart1, UART_IT_IDLE);
+}
+
+/**
+ * @brief IDLE 中断处理: 把 DMA 新收到的字节搬进环形缓冲
+ *        由 USART1_IRQHandler 调用 (stm32f1xx_it.c)
+ *
+ * 原理: DMA 在循环模式下持续把串口数据写进 uart1_rx_buf,
+ *       一旦总线空闲(一帧结束)产生 IDLE 中断,
+ *       通过 CNDTR 寄存器反推"新数据写到了哪个位置",
+ *       把 [上次位置, 当前位置) 之间的字节补进环形缓冲。
+ */
+void uart1_rx_idle_isr(void)
+{
+    uint16_t pos;
+
+    if (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_IDLE))
+    {
+        __HAL_UART_CLEAR_IDLEFLAG(&huart1);
+
+        pos = (uint16_t)(UART1_RX_BUF_SIZE - __HAL_DMA_GET_COUNTER(huart1.hdmarx));
+
+        while (uart1_rx_pos != pos)
+        {
+            rb_write(&uart1_rx_ring, uart1_rx_buf[uart1_rx_pos]);
+            uart1_rx_pos = (uint16_t)((uart1_rx_pos + 1) & (UART1_RX_BUF_SIZE - 1));
+        }
+    }
+}
 
 /* USER CODE END 1 */
 

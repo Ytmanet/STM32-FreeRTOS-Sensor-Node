@@ -28,6 +28,7 @@ extern "C" {
 #include "main.h"
 
 /* USER CODE BEGIN Includes */
+#include "ringbuf.h"
 
 /* USER CODE END Includes */
 
@@ -40,6 +41,9 @@ extern UART_HandleTypeDef huart1;
 void MX_USART1_UART_Init(void);
 
 /* USER CODE BEGIN Prototypes */
+void uart1_rx_start(void);      /* 启动 DMA 循环接收 + IDLE 中断 */
+void uart1_rx_idle_isr(void);   /* IDLE 中断处理, 供 stm32f1xx_it.c 调用 */
+extern RingBuf uart1_rx_ring;   /* 串口接收环形缓冲, 任务侧读取 */
 
 /* USER CODE END Prototypes */
 

@@ -28,6 +28,8 @@
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
 #include "adc.h"
+#include "usart.h"
+#include "ringbuf.h"
 
 /* USER CODE END Includes */
 
@@ -163,12 +165,22 @@ void StartUARTTask(void *argument)
 {
   /* USER CODE BEGIN StartUARTTask */
   SensorData rx_data;
+  uint8_t byte;
+
+  uart1_rx_start();   /* 启动 DMA 循环接收 + IDLE 中断 */
+  printf("UART RX ready: type anything, board echoes back\r\n");
 
   /* Infinite loop */
   for(;;)
   {
-    /* 阻塞等待队列: 有数据才醒, 没有就睡觉(不占CPU) */
-    if (osMessageQueueGet(q_sensor2uartHandle, &rx_data, NULL, osWaitForever) == osOK)
+    /* 1. 处理串口接收: 环形缓冲里的字节全部回显 (收一字节回一字节) */
+    while (rb_read(&uart1_rx_ring, &byte))
+    {
+        HAL_UART_Transmit(&huart1, &byte, 1, 100);
+    }
+
+    /* 2. 处理传感器数据队列: 有数据才醒, 没有就睡 50ms */
+    if (osMessageQueueGet(q_sensor2uartHandle, &rx_data, NULL, 50) == osOK)
     {
         printf("ADC: %u mV (raw %u)\r\n", rx_data.adc_mv, rx_data.adc_raw);
     }
