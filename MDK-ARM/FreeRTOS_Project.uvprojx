@@ -14,7 +14,6 @@
       <uAC6>0</uAC6>
       <TargetOption>
         <TargetCommonOption>
-          <uMicroLib>1</uMicroLib>
           <Device>STM32F103ZE</Device>
           <Vendor>STMicroelectronics</Vendor>
           <PackID>Keil.STM32F1xx_DFP.2.4.1</PackID>
@@ -459,6 +458,16 @@
               <FileName>ringbuf.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Src/ringbuf.c</FilePath>
+            </File>
+            <File>
+              <FileName>crc16.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Src/crc16.c</FilePath>
+            </File>
+            <File>
+              <FileName>protocol.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Src/protocol.c</FilePath>
             </File>
           </Files>
         </Group>

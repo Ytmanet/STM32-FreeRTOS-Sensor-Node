@@ -30,6 +30,7 @@
 #include "adc.h"
 #include "usart.h"
 #include "ringbuf.h"
+#include "protocol.h"
 
 /* USER CODE END Includes */
 
@@ -56,6 +57,10 @@ typedef struct
     uint16_t adc_raw;   /* ADC 原始值 0~4095 */
     uint16_t adc_mv;    /* 换算后的电压, 单位 mV */
 } SensorData;
+
+volatile uint16_t g_sample_interval_ms = 200;   /* 采样周期, 可被串口命令修改 */
+volatile uint8_t  g_device_id = 0x01;           /* 设备 ID (M4 再做成掉电保存) */
+volatile uint32_t g_proto_crc_err = 0;          /* CRC 错误帧计数, 调试用 */
 
 /* USER CODE END Variables */
 /* Definitions for UART_Protocol_T */
@@ -92,6 +97,7 @@ const osMessageQueueAttr_t q_sensor2display_attributes = {
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
+static void proto_handle_cmd(ProtoParser *p, uint8_t *tx_buf);
 
 /* USER CODE END FunctionPrototypes */
 
@@ -166,23 +172,51 @@ void StartUARTTask(void *argument)
   /* USER CODE BEGIN StartUARTTask */
   SensorData rx_data;
   uint8_t byte;
+  ProtoParser parser;
+  uint8_t tx_buf[PROTO_MAX_DATA_LEN + 6];
 
+  proto_init(&parser);
   uart1_rx_start();   /* 启动 DMA 循环接收 + IDLE 中断 */
-  printf("UART RX ready: type anything, board echoes back\r\n");
+  printf("Protocol ready: CMD 0x02=set param, 0x03=query\r\n");
 
   /* Infinite loop */
   for(;;)
   {
-    /* 1. 处理串口接收: 环形缓冲里的字节全部回显 (收一字节回一字节) */
+    /* 1. 串口字节 -> 协议状态机 */
     while (rb_read(&uart1_rx_ring, &byte))
     {
-        HAL_UART_Transmit(&huart1, &byte, 1, 100);
+        ProtoStatus st = proto_feed(&parser, byte);
+
+        if (st == PROTO_FRAME_OK)
+        {
+            proto_handle_cmd(&parser, tx_buf);
+        }
+        else if (st == PROTO_CRC_ERR)
+        {
+            g_proto_crc_err++;
+            printf("CRC err! count=%lu\r\n", (unsigned long)g_proto_crc_err);
+        }
+        else if (st == PROTO_LEN_ERR)
+        {
+            printf("LEN err!\r\n");
+        }
     }
 
-    /* 2. 处理传感器数据队列: 有数据才醒, 没有就睡 50ms */
+    /* 2. 传感器数据 -> CMD 0x01 上报帧 (DATA: adc_mv 高/低 + adc_raw 高/低) */
     if (osMessageQueueGet(q_sensor2uartHandle, &rx_data, NULL, 50) == osOK)
     {
-        printf("ADC: %u mV (raw %u)\r\n", rx_data.adc_mv, rx_data.adc_raw);
+        uint8_t payload[4];
+        uint16_t n;
+
+        payload[0] = (uint8_t)(rx_data.adc_mv >> 8);
+        payload[1] = (uint8_t)(rx_data.adc_mv & 0xFF);
+        payload[2] = (uint8_t)(rx_data.adc_raw >> 8);
+        payload[3] = (uint8_t)(rx_data.adc_raw & 0xFF);
+
+        n = proto_build(g_device_id, PROTO_CMD_REPORT, payload, 4, tx_buf);
+        HAL_UART_Transmit(&huart1, tx_buf, n, 100);
+
+        printf("ADC: %u mV (raw %u)\r\n", rx_data.adc_mv, rx_data.adc_raw);   /* 人眼调试 */
     }
   }
   /* USER CODE END StartUARTTask */
@@ -221,7 +255,7 @@ void StartSensorTask(void *argument)
     /* 发给 UART 任务; 队列满则阻塞等待(背压, 自动限流) */
     osMessageQueuePut(q_sensor2uartHandle, &tx_data, 0, osWaitForever);
 
-    osDelay(200);   /* 200ms 采一次 */
+    osDelay(g_sample_interval_ms);   /* 采样周期, 可被 CMD 0x02 修改 */
   }
   /* USER CODE END StartSensorTask */
 }
@@ -246,6 +280,62 @@ void StartDisplayTask(void *argument)
 
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
+/* 处理一帧完整命令, 组回复帧并通过串口发出 */
+static void proto_handle_cmd(ProtoParser *p, uint8_t *tx_buf)
+{
+    uint8_t reply_data[4];
+    uint8_t len = 0;
+    uint16_t n;
+
+    switch (p->cmd)
+    {
+        case PROTO_CMD_SET_PARAM:               /* 0x02: 设置参数 */
+        {
+            uint8_t status = 0;                 /* 0=成功, 1=参数无效 */
+
+            if (p->data_len >= 1)
+            {
+                if ((p->data[0] == PROTO_PARAM_INTERVAL) && (p->data_len >= 3))
+                {
+                    g_sample_interval_ms = (uint16_t)((p->data[1] << 8) | p->data[2]);
+                }
+                else if ((p->data[0] == PROTO_PARAM_DEVID) && (p->data_len >= 2))
+                {
+                    g_device_id = p->data[1];
+                }
+                else
+                {
+                    status = 1;
+                }
+                reply_data[0] = p->data[0];
+                reply_data[1] = status;
+                len = 2;
+            }
+            else
+            {
+                reply_data[0] = 0;
+                reply_data[1] = 1;
+                len = 2;
+            }
+            break;
+        }
+
+        case PROTO_CMD_QUERY:                   /* 0x03: 查询设备信息 */
+            reply_data[0] = 0x01;               /* 固件版本 V1.0 */
+            reply_data[1] = 0x00;
+            reply_data[2] = g_device_id;
+            len = 3;
+            break;
+
+        default:                                /* 未知命令: 回一个错误码 */
+            reply_data[0] = 0xFF;
+            len = 1;
+            break;
+    }
+
+    n = proto_build(g_device_id, p->cmd, reply_data, len, tx_buf);
+    HAL_UART_Transmit(&huart1, tx_buf, n, 100);
+}
 
 /* USER CODE END Application */
 
