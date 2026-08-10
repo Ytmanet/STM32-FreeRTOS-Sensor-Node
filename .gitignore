@@ -27,3 +27,6 @@ DebugConfig/
 *.bak
 Thumbs.db
 .DS_Store
+
+# 个人学习文档（不随仓库公开）
+docs/
