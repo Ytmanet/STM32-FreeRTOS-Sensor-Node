@@ -43,7 +43,7 @@ flowchart LR
 | 模块 | 接口 | 说明 |
 |------|------|------|
 | STM32F103ZET6 最小系统板 | - | 主控 |
-| SHT30 温湿度传感器 | I2C1（PB6/PB7） | 7 位地址 0x44 |
+| SHT30 温湿度传感器 | I2C1（PB6/PB7） | 7 位地址 0x44，软件模拟 I2C 驱动 |
 | 电位器 | ADC1_IN1（PA1） | 12 位，3.3V 参考 |
 | TFTLCD（MCU 屏） | FSMC（NE4 + A10） | 8080 并口，16 位数据线 |
 | USB 转串口 | USART1（PA9/PA10） | 115200-8-N-1 |
@@ -72,7 +72,7 @@ CRC16-MODBUS 覆盖 ID + CMD + LEN + DATA 字段。
 | M1 | 最小闭环（ADC -> 队列 -> 串口） | 修复 Strict ANSI 导致的 #667、MicroLIB/semihosting 启动崩溃 |
 | M2 | UART 接收（DMA + IDLE + 环形缓冲） | 无阻塞接收、粘包切帧、单生产者单消费者无锁 |
 | M3 | 协议帧 + CRC16 | 三态状态机自动同步、查表法校验 |
-| M4 | SHT30 + Flash 掉电保存 | I2C 时序、Flash 扇区地址修正、参数 CRC 校验 |
+| M4 | SHT30 + Flash 掉电保存 | 软件模拟 I2C（硬件外设不产生时钟）、Flash 扇区地址修正、参数 CRC 校验 |
 | M5 | TFTLCD 移植（FSMC） | 驱动移植四坑、界面防闪烁 |
 
 ## 目录结构

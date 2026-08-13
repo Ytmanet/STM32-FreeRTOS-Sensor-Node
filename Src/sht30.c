@@ -1,49 +1,184 @@
 /**
  ******************************************************************************
  * @file    sht30.c
- * @brief   SHT30 æ¸©æ¹¿åº¦ä¼ æ„Ÿå™¨é©±åŠ¨ (I2C1, PB6/PB7)
+ * @brief   SHT30 ÎÂÊª¶È´«¸ÐÆ÷Çý¶¯ (Èí¼þÄ£Äâ I2C)
  *
- * è¯»å–æµç¨‹:
- *   1. å‘æµ‹é‡å‘½ä»¤ 0x24 0x00 (é«˜é‡å¤æ€§, æ— æ—¶é’Ÿæ‹‰ä¼¸)
- *   2. ç­‰å¾… ~15ms æµ‹é‡å®Œæˆ
- *   3. è¯» 6 å­—èŠ‚: æ¸©åº¦(2) + æ¸©åº¦CRC(1) + æ¹¿åº¦(2) + æ¹¿åº¦CRC(1)
- * æ¢ç®—å…¬å¼:
- *   æ¸©åº¦ T = -45 + 175 Ã— raw/65535
- *   æ¹¿åº¦ RH = 100 Ã— raw/65535
+ * Ó²¼þ I2C ÍâÉèÔÚ´Ë¹¤³ÌÖÐÎÞ·¨²úÉúÊ±ÖÓ(SB=0), ¸ÄÓÃÈí¼þÄ£Äâ:
+ *   PB6 = SCL (ÍÆÍìÊä³ö)
+ *   PB7 = SDA (¿ªÂ©Êä³ö, Íâ²¿ÉÏÀ­ÒÑÑéÖ¤´æÔÚ)
+ *
+ * ¶ÁÈ¡Á÷³Ì:
+ *   1. ·¢²âÁ¿ÃüÁî 0x24 0x00 (¸ßÖØ¸´ÐÔ, ÎÞÊ±ÖÓÀ­Éì)
+ *   2. µÈ´ý ~20ms ²âÁ¿Íê³É
+ *   3. ¶Á 6 ×Ö½Ú: ÎÂ¶È(2) + ÎÂ¶ÈCRC(1) + Êª¶È(2) + Êª¶ÈCRC(1)
+ * »»Ëã¹«Ê½:
+ *   ÎÂ¶È T = -45 + 175 ¡Á raw/65535
+ *   Êª¶È RH = 100 ¡Á raw/65535
  ******************************************************************************
  */
 #include "sht30.h"
 #include "i2c.h"
+#include <stdio.h>
 
-#define SHT30_I2C_ADDR      0x88    /* 7ä½åœ°å€ 0x44, HAL æŽ¥å£è¦å·¦ç§»ä¸€ä½ */
-#define SHT30_CMD_MEAS_H    0x24    /* é«˜é‡å¤æ€§æµ‹é‡å‘½ä»¤(æ— æ—¶é’Ÿæ‹‰ä¼¸) */
-#define SHT30_CMD_MEAS_L    0x00
+#define SHT30_ADDR_44      0x44    /* ADDR ½ÓµØ/Ðü¿ÕÊ±µØÖ· */
+#define SHT30_ADDR_45      0x45    /* ADDR ½Ó¸ßÊ±µØÖ· */
+#define SHT30_CMD_MEAS_H   0x24    /* ¸ßÖØ¸´ÐÔ²âÁ¿ÃüÁî, ÎÞÊ±ÖÓÀ­Éì */
+#define SHT30_CMD_MEAS_L   0x00
+
+#define SCL_PIN  GPIO_PIN_6
+#define SDA_PIN  GPIO_PIN_7
+#define I2C_SCL_H() HAL_GPIO_WritePin(GPIOB, SCL_PIN, GPIO_PIN_SET)
+#define I2C_SCL_L() HAL_GPIO_WritePin(GPIOB, SCL_PIN, GPIO_PIN_RESET)
+#define I2C_SDA_H() HAL_GPIO_WritePin(GPIOB, SDA_PIN, GPIO_PIN_SET)
+#define I2C_SDA_L() HAL_GPIO_WritePin(GPIOB, SDA_PIN, GPIO_PIN_RESET)
+#define I2C_SDA_RD() HAL_GPIO_ReadPin(GPIOB, SDA_PIN)
+
+static uint8_t sht30_addr = 0xFF;   /* 0xFF = ÉÐÎ´Ì½²â */
+
+static void sw_i2c_delay(void)
+{
+    volatile uint32_t i;
+    for (i = 0; i < 50; i++);
+}
+
+static void sw_i2c_start(void)
+{
+    I2C_SDA_H(); I2C_SCL_H(); sw_i2c_delay();
+    I2C_SDA_L(); sw_i2c_delay();
+    I2C_SCL_L();
+}
+
+static void sw_i2c_stop(void)
+{
+    I2C_SDA_L(); sw_i2c_delay();
+    I2C_SCL_H(); sw_i2c_delay();
+    I2C_SDA_H(); sw_i2c_delay();
+}
+
+/* ·µ»Ø 0 = ÊÕµ½ ACK, 1 = NACK */
+static uint8_t sw_i2c_write_byte(uint8_t dat)
+{
+    uint8_t i, ack;
+    for (i = 0; i < 8; i++)
+    {
+        if (dat & 0x80) I2C_SDA_H(); else I2C_SDA_L();
+        dat <<= 1;
+        sw_i2c_delay();
+        I2C_SCL_H(); sw_i2c_delay(); I2C_SCL_L();
+    }
+    I2C_SDA_H();                /* ÊÍ·Å SDA, ¶Á´Ó»ú ACK */
+    sw_i2c_delay();
+    I2C_SCL_H(); sw_i2c_delay();
+    ack = I2C_SDA_RD();
+    I2C_SCL_L(); sw_i2c_delay();
+    return ack ? 1 : 0;
+}
+
+/* ack: 0 = Ö÷¿Ø¼ÌÐø¸ø ACK, 1 = Ö÷¿Ø¸ø NACK(×îºóÒ»×Ö½Ú) */
+static uint8_t sw_i2c_read_byte(uint8_t ack)
+{
+    uint8_t i, dat = 0;
+    I2C_SDA_H();                /* ÊÍ·Å SDA, ÓÉ´Ó»úÇý¶¯ */
+    for (i = 0; i < 8; i++)
+    {
+        dat <<= 1;
+        I2C_SCL_H(); sw_i2c_delay();
+        if (I2C_SDA_RD()) dat |= 0x01;
+        I2C_SCL_L(); sw_i2c_delay();
+    }
+    if (ack) I2C_SDA_H(); else I2C_SDA_L();   /* NACK / ACK */
+    sw_i2c_delay();
+    I2C_SCL_H(); sw_i2c_delay(); I2C_SCL_L(); sw_i2c_delay();
+    I2C_SDA_H();
+    return dat;
+}
+
+/* ½« PB6/PB7 ´Ó I2C ¸´ÓÃ¸ÄÎªÆÕÍ¨ GPIO: SCL ÍÆÍì, SDA ¿ªÂ©(¿¿Íâ²¿ÉÏÀ­) */
+static void sht30_sw_init(void)
+{
+    GPIO_InitTypeDef g = {0};
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    g.Pin = SCL_PIN;
+    g.Mode = GPIO_MODE_OUTPUT_PP;
+    g.Speed = GPIO_SPEED_FREQ_HIGH;
+    HAL_GPIO_Init(GPIOB, &g);
+    g.Pin = SDA_PIN;
+    g.Mode = GPIO_MODE_OUTPUT_OD;
+    HAL_GPIO_Init(GPIOB, &g);
+    I2C_SCL_H(); I2C_SDA_H();
+    printf("SW-I2C ready (SCL=PB6 PP, SDA=PB7 OD)\r\n");
+}
+
+/* Ì½²â´Ó»úµØÖ·: ·µ»Ø 0 = ÓÐÓ¦´ð */
+static int sht30_probe_addr(uint8_t addr7)
+{
+    uint8_t ack;
+    sw_i2c_start();
+    ack = sw_i2c_write_byte((addr7 << 1) | 0);   /* Ð´·½Ïò */
+    sw_i2c_stop();
+    return (ack == 0) ? 0 : -1;
+}
 
 int sht30_read(int16_t *temp_x10, int16_t *humi_x10)
 {
-    uint8_t cmd[2] = {SHT30_CMD_MEAS_H, SHT30_CMD_MEAS_L};
     uint8_t buf[6];
     uint16_t t_raw, h_raw;
+    int i;
 
-    /* 1. å‘æµ‹é‡å‘½ä»¤ */
-    if (HAL_I2C_Master_Transmit(&hi2c1, SHT30_I2C_ADDR, cmd, 2, 50) != HAL_OK)
+    /* Ê×´Îµ÷ÓÃ: ³õÊ¼»¯Òý½Å + Ì½²âµØÖ· */
+    if (sht30_addr == 0xFF)
     {
-        return -1;
+        sht30_sw_init();
+        if (sht30_probe_addr(SHT30_ADDR_44) == 0)
+        {
+            sht30_addr = SHT30_ADDR_44;
+            printf("SW-I2C found @0x44\r\n");
+        }
+        else if (sht30_probe_addr(SHT30_ADDR_45) == 0)
+        {
+            sht30_addr = SHT30_ADDR_45;
+            printf("SW-I2C found @0x45\r\n");
+        }
+        else
+        {
+            printf("SW-I2C no device on bus\r\n");
+            return -1;
+        }
     }
 
-    /* 2. ç­‰ä¼ æ„Ÿå™¨å®Œæˆæµ‹é‡ (çº¦ 15ms) */
+    /* 1. ·¢²âÁ¿ÃüÁî */
+    sw_i2c_start();
+    if (sw_i2c_write_byte((sht30_addr << 1) | 0) != 0)   /* Ð´·½Ïò */
+    {
+        sw_i2c_stop();
+        printf("SHT30 no ACK (write)\r\n");
+        return -1;
+    }
+    sw_i2c_write_byte(SHT30_CMD_MEAS_H);
+    sw_i2c_write_byte(SHT30_CMD_MEAS_L);
+    sw_i2c_stop();
+
+    /* 2. µÈ´«¸ÐÆ÷Íê³É²âÁ¿ */
     HAL_Delay(20);
 
-    /* 3. è¯» 6 å­—èŠ‚ç»“æžœ */
-    if (HAL_I2C_Master_Receive(&hi2c1, SHT30_I2C_ADDR, buf, 6, 50) != HAL_OK)
+    /* 3. ¶Á 6 ×Ö½Ú½á¹û */
+    sw_i2c_start();
+    if (sw_i2c_write_byte((sht30_addr << 1) | 1) != 0)   /* ¶Á·½Ïò */
     {
+        sw_i2c_stop();
+        printf("SHT30 no ACK (read)\r\n");
         return -1;
     }
+    for (i = 0; i < 6; i++)
+    {
+        buf[i] = sw_i2c_read_byte((i == 5) ? 1 : 0);     /* ×îºóÒ»×Ö½Ú NACK */
+    }
+    sw_i2c_stop();
 
     t_raw = (uint16_t)((buf[0] << 8) | buf[1]);
     h_raw = (uint16_t)((buf[3] << 8) | buf[4]);
 
-    /* Ã—10 æ•´æ•°æ¢ç®—, é¿å…æµ®ç‚¹ */
+    /* ¡Á10 ÕûÊý»»Ëã, ±ÜÃâ¸¡µã */
     *temp_x10 = (int16_t)(-450 + (1750L * t_raw) / 65535L);
     *humi_x10 = (int16_t)((1000L * h_raw) / 65535L);
 

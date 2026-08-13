@@ -304,7 +304,7 @@ void StartDisplayTask(void *argument)
   /* USER CODE BEGIN StartDisplayTask */
   SensorData disp;
   char buf[20];
-  int16_t last_temp = 0x7FFF, last_humi = 0x7FFF;
+  int16_t last_temp = 0x7FFE, last_humi = 0x7FFE;   /* init != 0x7FFF invalid marker, force first draw */
   uint16_t last_adc = 0xFFFF, last_id = 0xFFFF, last_rate = 0xFFFF;
 
   lcd_init();                 /* 初始化 LCD (含上电延时, 只执行一次) */
