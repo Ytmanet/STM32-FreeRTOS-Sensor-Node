@@ -23,6 +23,8 @@
 #include "stm32f1xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <stdio.h>
+#include "usart.h"   /* uart1_rx_idle_isr prototype */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -88,10 +90,35 @@ void NMI_Handler(void)
 /**
   * @brief This function handles Hard fault interrupt.
   */
+/* USER CODE BEGIN 0 */
+/* Fault info saved here - inspect in debugger (Watch window) */
+volatile uint32_t g_fault_cfsr  = 0;
+volatile uint32_t g_fault_hfsr  = 0;
+volatile uint32_t g_fault_mmfar = 0;
+volatile uint32_t g_fault_bfar  = 0;
+volatile uint32_t g_fault_pc    = 0;
+/* USER CODE END 0 */
+
 void HardFault_Handler(void)
 {
   /* USER CODE BEGIN HardFault_IRQn 0 */
-
+  __disable_irq();
+  /* Safe dump: no printf / no raw PSP deref (avoids 2nd fault inside the handler) */
+  g_fault_cfsr  = SCB->CFSR;
+  g_fault_hfsr  = SCB->HFSR;
+  g_fault_mmfar = SCB->MMFAR;
+  g_fault_bfar  = SCB->BFAR;
+  {
+    uint32_t sp = (__get_CONTROL() & 0x02) ? __get_PSP() : __get_MSP();
+    if (sp >= 0x20000000u && sp < 0x20010000u)
+    {
+      volatile uint32_t *frame = (volatile uint32_t *)sp;
+      if (frame[6] >= 0x08000000u && frame[6] < 0x08100000u)
+      {
+        g_fault_pc = frame[6];   /* stacked PC */
+      }
+    }
+  }
   /* USER CODE END HardFault_IRQn 0 */
   while (1)
   {
@@ -231,7 +258,7 @@ void USART1_IRQHandler(void)
   /* USER CODE END USART1_IRQn 0 */
   HAL_UART_IRQHandler(&huart1);
   /* USER CODE BEGIN USART1_IRQn 1 */
-  uart1_rx_idle_isr();          /* 处理 IDLE: 把 DMA 新数据搬进环形缓冲 */
+  uart1_rx_idle_isr();          /* UART IDLE: DMA moved new data into ring buffer */
 
   /* USER CODE END USART1_IRQn 1 */
 }

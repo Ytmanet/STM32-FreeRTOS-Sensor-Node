@@ -35,13 +35,25 @@
 #include "lcdfont.h"
 #include <stdio.h>
 
+/* DWT 精确微秒延时 (72MHz, 不受 FreeRTOS SysTick 影响)
+ * 之前是 NOP 近似实现(~0.7us/次), XPT2046 SPI 采样在时钟边缘不稳定,
+ * 偶发位错位 -> AD 值翻倍(如 7821>4095) -> 触摸坐标转换失败。 */
 void delay_us(uint32_t us)
 {
-    uint32_t i;
-    while (us--)
+    static uint8_t dwt_init = 0;
+    uint32_t start, ticks;
+
+    if (!dwt_init)
     {
-        for (i = 0; i < 12; i++) { __NOP(); }
+        CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;    /* 使能 DWT 访问 */
+        DWT->CYCCNT = 0;
+        DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;               /* 使能 CYCCNT */
+        dwt_init = 1;
     }
+
+    start = DWT->CYCCNT;
+    ticks = us * (SystemCoreClock / 1000000UL);            /* 1us = 72 cycles */
+    while ((DWT->CYCCNT - start) < ticks) { }
 }
 
 

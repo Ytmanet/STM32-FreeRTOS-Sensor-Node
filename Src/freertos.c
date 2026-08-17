@@ -28,6 +28,10 @@
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
 #include <string.h>
+#include "lvgl.h"
+#include "lv_port_disp.h"
+#include <stdio.h>
+#include <string.h>
 #include "adc.h"
 #include "usart.h"
 #include "ringbuf.h"
@@ -35,6 +39,8 @@
 #include "sht30.h"
 #include "flash_param.h"
 #include "lcd.h"
+#include "touch.h"
+#include "lv_port_indev.h"
 
 /* USER CODE END Includes */
 
@@ -58,15 +64,16 @@
 /* 传感器数据包: 队列里传的就是这个结构体 */
 typedef struct
 {
-    uint16_t adc_raw;   /* ADC 原始值 0~4095 */
+uint16_t adc_raw;   /* ADC raw value 0~4095 */
     uint16_t adc_mv;    /* 换算后的电压, 单位 mV */
     int16_t  temp_x10;  /* 温度 ×10, 256 = 25.6°C; 0x7FFF = 无效 */
     int16_t  humi_x10;  /* 湿度 ×10, 600 = 60.0%; 0x7FFF = 无效 */
 } SensorData;
 
 volatile uint16_t g_sample_interval_ms = 200;   /* 采样周期, 可被串口命令修改 */
-volatile uint8_t  g_device_id = 0x01;           /* 设备 ID (M4 再做成掉电保存) */
-volatile uint32_t g_proto_crc_err = 0;          /* CRC 错误帧计数, 调试用 */
+volatile uint8_t  g_device_id = 0x01;           /* device ID (TODO: persist in flash) */
+volatile uint32_t g_proto_crc_err = 0;
+osMutexId_t uart_tx_mutex = NULL;   /* serial printf mutex (shared with main.c fputc) */          /* CRC error frame counter (debug) */
 
 /* USER CODE END Variables */
 /* Definitions for UART_Protocol_T */
@@ -87,7 +94,7 @@ const osThreadAttr_t Sensor_Task_attributes = {
 osThreadId_t Display_TaskHandle;
 const osThreadAttr_t Display_Task_attributes = {
   .name = "Display_Task",
-  .stack_size = 512 * 4,
+  .stack_size = 2048 * 4,
   .priority = (osPriority_t) osPriorityBelowNormal1,
 };
 /* Definitions for q_sensor2uart */
@@ -112,6 +119,18 @@ void StartSensorTask(void *argument);
 void StartDisplayTask(void *argument);
 
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
+/* FreeRTOS stack overflow hook: print + loop forever */
+/* FreeRTOS malloc failed hook: print + loop forever */
+void vApplicationMallocFailedHook(void)
+{
+    printf("MALLOC FAILED!\r\n");
+    while (1);
+}
+void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
+{
+    printf("STACK OVERFLOW: %s\r\n", pcTaskName);
+    while (1);
+}
 
 /**
   * @brief  FreeRTOS initialization
@@ -124,7 +143,7 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE END Init */
 
   /* USER CODE BEGIN RTOS_MUTEX */
-  /* add mutexes, ... */
+  uart_tx_mutex = osMutexNew(NULL);
   /* USER CODE END RTOS_MUTEX */
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
@@ -184,7 +203,7 @@ void StartUARTTask(void *argument)
   proto_init(&parser);
   uart1_rx_start();   /* 启动 DMA 循环接收 + IDLE 中断 */
 
-  /* 开机加载掉电保存的参数, 没有则用默认值 */
+/* load params from flash; use defaults if absent */
   {
       uint16_t id, interval;
       if (flash_param_load(&id, &interval) == 0)
@@ -223,7 +242,7 @@ void StartUARTTask(void *argument)
         }
     }
 
-    /* 2. 传感器数据 -> CMD 0x01 上报帧 (DATA: adc_mv 高/低 + adc_raw 高/低) */
+/* sensor data -> CMD 0x01 report (DATA: adc_mv 2B + adc_raw 2B) */
     if (osMessageQueueGet(q_sensor2uartHandle, &rx_data, NULL, 50) == osOK)
     {
         uint8_t payload[8];
@@ -260,7 +279,7 @@ void StartSensorTask(void *argument)
   /* Infinite loop */
   for(;;)
   {
-    /* 单次采集: 启动 -> 等转换完成 -> 取值 -> 停止 */
+/* one-shot: start -> wait -> read -> stop */
     HAL_ADC_Start(&hadc1);
     if (HAL_ADC_PollForConversion(&hadc1, 10) == HAL_OK)
     {
@@ -272,10 +291,10 @@ void StartSensorTask(void *argument)
     }
     HAL_ADC_Stop(&hadc1);
 
-    /* 换算电压: 12位ADC, 3.3V 参考电压 */
+/* convert: 12-bit ADC, 3.3V reference */
     tx_data.adc_mv = (uint16_t)((uint32_t)tx_data.adc_raw * 3300UL / 4095UL);
 
-    /* 读 SHT30 温湿度; 没接模块会失败, 填无效值 0x7FFF */
+/* SHT30 read fail -> 0x7FFF invalid */
     if (sht30_read(&tx_data.temp_x10, &tx_data.humi_x10) != 0)
     {
         tx_data.temp_x10 = 0x7FFF;
@@ -283,13 +302,94 @@ void StartSensorTask(void *argument)
     }
 
     /* 发给 UART 任务; 队列满则阻塞等待(背压, 自动限流) */
-    osMessageQueuePut(q_sensor2uartHandle, &tx_data, 0, osWaitForever);
+    osMessageQueuePut(q_sensor2uartHandle, &tx_data, 0, 100);
     /* 同时发给显示任务 */
-    osMessageQueuePut(q_sensor2displayHandle, &tx_data, 0, osWaitForever);
+    osMessageQueuePut(q_sensor2displayHandle, &tx_data, 0, 100);
 
     osDelay(g_sample_interval_ms);   /* 采样周期, 可被 CMD 0x02 修改 */
   }
   /* USER CODE END StartSensorTask */
+}
+
+/* ===== App page framework =====
+ * Desktop + app pages are persistent lv_obj_t screens, switched by lv_scr_load().
+ * Handles are file-static so the UI refresh loop can update them anytime. */
+static lv_obj_t *scr_desktop = NULL;
+static lv_obj_t *scr_clock = NULL;
+static lv_obj_t *scr_weather = NULL;
+static lv_obj_t *scr_adc = NULL;
+static lv_obj_t *lbl_desk_time = NULL;  /* desktop status time */
+static lv_obj_t *lbl_clock_big = NULL;  /* clock app big text */
+static lv_obj_t *lbl_w_temp = NULL;     /* weather app */
+static lv_obj_t *lbl_w_humi = NULL;
+static lv_obj_t *lbl_adc_big = NULL;    /* adc app */
+static lv_obj_t *lbl_adc_raw = NULL;
+static uint32_t g_boot_tick = 0;        /* os tick at display task start */
+
+/* desktop icon -> open app page */
+static void app_open_clock_cb(lv_event_t *e)   { (void)e; lv_scr_load(scr_clock); }
+static void app_open_weather_cb(lv_event_t *e) { (void)e; lv_scr_load(scr_weather); }
+static void app_open_adc_cb(lv_event_t *e)     { (void)e; lv_scr_load(scr_adc); }
+
+/* app page back button -> desktop */
+static void app_back_cb(lv_event_t *e)         { (void)e; lv_scr_load(scr_desktop); }
+
+/* uniform dark button style */
+static void ui_btn_style(lv_obj_t *btn)
+{
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x1E2A38), 0);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x2A3B4D), LV_STATE_PRESSED);
+    lv_obj_set_style_radius(btn, 10, 0);
+    lv_obj_set_style_shadow_width(btn, 0, 0);
+}
+
+/* desktop icon: big symbol + small name label */
+static lv_obj_t *ui_icon_create(lv_obj_t *parent, lv_coord_t x, lv_coord_t y,
+                                const char *symbol, const char *name, lv_event_cb_t cb)
+{
+    lv_obj_t *btn = lv_btn_create(parent);
+    lv_obj_set_size(btn, 68, 78);
+    lv_obj_set_pos(btn, x, y);
+    ui_btn_style(btn);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *sym = lv_label_create(btn);
+    lv_label_set_text(sym, symbol);
+    lv_obj_set_style_text_color(sym, lv_color_hex(0x8AB4F8), 0);
+    lv_obj_set_style_text_font(sym, &lv_font_montserrat_20, 0);
+    lv_obj_align(sym, LV_ALIGN_TOP_MID, 0, 12);
+
+    lv_obj_t *nm = lv_label_create(btn);
+    lv_label_set_text(nm, name);
+    lv_obj_set_style_text_color(nm, lv_color_hex(0xCCCCCC), 0);
+    lv_obj_set_style_text_font(nm, &lv_font_montserrat_14, 0);
+    lv_obj_align(nm, LV_ALIGN_BOTTOM_MID, 0, -8);
+    return btn;
+}
+
+/* app page scaffold: title + back button, caller adds content */
+static lv_obj_t *ui_app_page_create(const char *title, uint32_t title_color)
+{
+    lv_obj_t *scr = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x101820), 0);
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *lbl = lv_label_create(scr);
+    lv_label_set_text(lbl, title);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(title_color), 0);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_20, 0);
+    lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, 20);
+
+    lv_obj_t *btn = lv_btn_create(scr);
+    lv_obj_set_size(btn, 52, 34);
+    lv_obj_align(btn, LV_ALIGN_TOP_LEFT, 8, 10);
+    ui_btn_style(btn);
+    lv_obj_add_event_cb(btn, app_back_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *b = lv_label_create(btn);
+    lv_label_set_text(b, LV_SYMBOL_LEFT);
+    lv_obj_set_style_text_color(b, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_center(b);
+    return scr;
 }
 
 /* USER CODE BEGIN Header_StartDisplayTask */
@@ -303,95 +403,157 @@ void StartDisplayTask(void *argument)
 {
   /* USER CODE BEGIN StartDisplayTask */
   SensorData disp;
-  char buf[20];
-  int16_t last_temp = 0x7FFE, last_humi = 0x7FFE;   /* init != 0x7FFF invalid marker, force first draw */
-  uint16_t last_adc = 0xFFFF, last_id = 0xFFFF, last_rate = 0xFFFF;
 
-  lcd_init();                 /* 初始化 LCD (含上电延时, 只执行一次) */
-  lcd_clear(WHITE);           /* 清屏 */
+  g_boot_tick = osKernelGetTickCount();   /* boot moment for uptime clock */
 
-  /* ===== 静态界面: 边框/标题/标签只画一次, 之后只刷新数值 ===== */
-  lcd_draw_rectangle(6, 6, 233, 313, GRAY);            /* 边框 */
-  lcd_show_string(16, 12, 200, 16, 16, "STM32 Sensor Node", RED);
-  lcd_draw_hline(16, 36, 208, GRAY);                   /* 分隔线 */
+  lcd_init();    /* init LCD (one-time at boot) */
+  printf("[LVGL] lcd_init done\r\n");
+  lv_init();    /* init LVGL */
+  printf("[LVGL] lv_init done\r\n");
+  lv_port_disp_init();    /* register display driver */
+  printf("[LVGL] disp_init done\r\n");
 
-  lcd_show_string(16, 48, 70, 16, 16, "Temp:", BLACK);
-  lcd_show_string(16, 80, 70, 16, 16, "Humi:", BLACK);
-  lcd_show_string(16, 112, 70, 16, 16, "ADC:", BLACK);
-  lcd_show_string(16, 144, 70, 16, 16, "ID:", BLACK);
-  lcd_show_string(16, 176, 70, 16, 16, "Rate:", BLACK);
+  /* touch: XPT2046 resistive init + register LVGL input device */
+  uint8_t tp_ok = tp_init();
+  printf("[TP] tp_init %s (calib %s)\r\n", tp_ok ? "UNCALIB" : "OK",
+         g_tp_calib_ok ? "OK" : "NONE");
+  lv_port_indev_init();
 
-  /* Infinite loop */
+
+
+  /* ===== Desktop: title + status time + 3 app icons ===== */
+  scr_desktop = lv_scr_act();
+  lv_obj_set_style_bg_color(scr_desktop, lv_color_hex(0x101820), 0);
+
+  lv_obj_t *lbl_t = lv_label_create(scr_desktop);
+  lv_label_set_text(lbl_t, "Sensor OS");
+  lv_obj_set_style_text_color(lbl_t, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_text_font(lbl_t, &lv_font_montserrat_20, 0);
+  lv_obj_align(lbl_t, LV_ALIGN_TOP_MID, 0, 14);
+
+  /* status time (uptime) */
+  lbl_desk_time = lv_label_create(scr_desktop);
+  lv_label_set_text(lbl_desk_time, "00:00:00");
+  lv_obj_set_style_text_color(lbl_desk_time, lv_color_hex(0x8AB4F8), 0);
+  lv_obj_set_style_text_font(lbl_desk_time, &lv_font_montserrat_14, 0);
+  lv_obj_align(lbl_desk_time, LV_ALIGN_TOP_MID, 0, 46);
+
+  /* separator */
+  lv_obj_t *sep = lv_obj_create(scr_desktop);
+  lv_obj_set_size(sep, 200, 2);
+  lv_obj_set_style_bg_color(sep, lv_color_hex(0x3A4A5A), 0);
+  lv_obj_set_style_border_width(sep, 0, 0);
+  lv_obj_set_style_pad_all(sep, 0, 0);
+  lv_obj_set_style_radius(sep, 0, 0);
+  lv_obj_clear_flag(sep, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_align(sep, LV_ALIGN_TOP_MID, 0, 64);
+
+  /* app icons: one row of 3 */
+  ui_icon_create(scr_desktop, 12, 110, LV_SYMBOL_BELL,    "Clock",   app_open_clock_cb);
+  ui_icon_create(scr_desktop, 86, 110, LV_SYMBOL_REFRESH, "Weather", app_open_weather_cb);
+  ui_icon_create(scr_desktop, 160, 110, LV_SYMBOL_CHARGE, "ADC",     app_open_adc_cb);
+
+  lv_obj_t *ver = lv_label_create(scr_desktop);
+  lv_label_set_text(ver, "FreeRTOS + LVGL v1.0");
+  lv_obj_set_style_text_color(ver, lv_color_hex(0x556070), 0);
+  lv_obj_set_style_text_font(ver, &lv_font_montserrat_14, 0);
+  lv_obj_align(ver, LV_ALIGN_BOTTOM_MID, 0, -8);
+
+  /* ===== Clock app page ===== */
+  scr_clock = ui_app_page_create("Clock", 0x4FC3F7);
+  lbl_clock_big = lv_label_create(scr_clock);
+  lv_label_set_text(lbl_clock_big, "00:00:00");
+  lv_obj_set_style_text_color(lbl_clock_big, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_text_font(lbl_clock_big, &lv_font_montserrat_20, 0);
+  lv_obj_align(lbl_clock_big, LV_ALIGN_CENTER, 0, -20);
+  lv_obj_t *clk_note = lv_label_create(scr_clock);
+  lv_label_set_text(clk_note, "UPTIME (HH:MM:SS)");
+  lv_obj_set_style_text_color(clk_note, lv_color_hex(0x556070), 0);
+  lv_obj_set_style_text_font(clk_note, &lv_font_montserrat_14, 0);
+  lv_obj_align(clk_note, LV_ALIGN_CENTER, 0, 20);
+
+  /* ===== Weather app page ===== */
+  scr_weather = ui_app_page_create("Weather", 0x4FC3F7);
+  lbl_w_temp = lv_label_create(scr_weather);
+  lv_label_set_text(lbl_w_temp, "Temp: --");
+  lv_obj_set_style_text_color(lbl_w_temp, lv_color_hex(0xFF8C42), 0);
+  lv_obj_set_style_text_font(lbl_w_temp, &lv_font_montserrat_20, 0);
+  lv_obj_align(lbl_w_temp, LV_ALIGN_CENTER, 0, -30);
+  lbl_w_humi = lv_label_create(scr_weather);
+  lv_label_set_text(lbl_w_humi, "Humi: --");
+  lv_obj_set_style_text_color(lbl_w_humi, lv_color_hex(0x81C784), 0);
+  lv_obj_set_style_text_font(lbl_w_humi, &lv_font_montserrat_20, 0);
+  lv_obj_align(lbl_w_humi, LV_ALIGN_CENTER, 0, 20);
+
+  /* ===== ADC app page ===== */
+  scr_adc = ui_app_page_create("ADC", 0x81C784);
+  lbl_adc_big = lv_label_create(scr_adc);
+  lv_label_set_text(lbl_adc_big, "-- mV");
+  lv_obj_set_style_text_color(lbl_adc_big, lv_color_hex(0x81C784), 0);
+  lv_obj_set_style_text_font(lbl_adc_big, &lv_font_montserrat_20, 0);
+  lv_obj_align(lbl_adc_big, LV_ALIGN_CENTER, 0, -30);
+  lbl_adc_raw = lv_label_create(scr_adc);
+  lv_label_set_text(lbl_adc_raw, "raw: ----");
+  lv_obj_set_style_text_color(lbl_adc_raw, lv_color_hex(0x556070), 0);
+  lv_obj_set_style_text_font(lbl_adc_raw, &lv_font_montserrat_14, 0);
+  lv_obj_align(lbl_adc_raw, LV_ALIGN_CENTER, 0, 20);
+
+  printf("[LVGL] UI created\r\n");
+  {
+      lv_mem_monitor_t lv_mon;
+      lv_mem_monitor(&lv_mon);
+      printf("[LVGL] mem total=%u free=%u frag=%u%%\r\n", (unsigned)lv_mon.total_size, (unsigned)lv_mon.free_size, (unsigned)lv_mon.frag_pct);
+  }
+
+/* idle: update UI + call LVGL timer handler */
+  uint32_t last_sec = 0;
   for(;;)
   {
-    if (osMessageQueueGet(q_sensor2displayHandle, &disp, NULL, osWaitForever) == osOK)
+    if (osMessageQueueGet(q_sensor2displayHandle, &disp, NULL, 5) == osOK)
     {
-        /* 温度: 值变化才刷新 (SHT30 变化很慢, 不会频繁刷屏) */
-        if (disp.temp_x10 != last_temp)
-        {
-            if (disp.temp_x10 != 0x7FFF)
-                sprintf(buf, "%d.%d C", disp.temp_x10 / 10,
-                        (disp.temp_x10 % 10 < 0) ? -(disp.temp_x10 % 10) : (disp.temp_x10 % 10));
-            else
-                strcpy(buf, "N/A");
-            lcd_fill(90, 48, 228, 63, WHITE);          /* 只擦数值区 */
-            lcd_show_string(90, 48, 138, 16, 16, buf, BLUE);
-            last_temp = disp.temp_x10;
-        }
+        if (disp.temp_x10 != 0x7FFF)
+            lv_label_set_text_fmt(lbl_w_temp, "Temp: %d.%d C", disp.temp_x10 / 10,
+                                  (disp.temp_x10 % 10 < 0) ? -(disp.temp_x10 % 10) : (disp.temp_x10 % 10));
+        else
+            lv_label_set_text(lbl_w_temp, "Temp: N/A");
 
-        /* 湿度 */
-        if (disp.humi_x10 != last_humi)
-        {
-            if (disp.humi_x10 != 0x7FFF)
-                sprintf(buf, "%d.%d %%", disp.humi_x10 / 10, disp.humi_x10 % 10);
-            else
-                strcpy(buf, "N/A");
-            lcd_fill(90, 80, 228, 95, WHITE);
-            lcd_show_string(90, 80, 138, 16, 16, buf, BLUE);
-            last_humi = disp.humi_x10;
-        }
+        if (disp.humi_x10 != 0x7FFF)
+            lv_label_set_text_fmt(lbl_w_humi, "Humi: %d.%d %%", disp.humi_x10 / 10, disp.humi_x10 % 10);
+        else
+            lv_label_set_text(lbl_w_humi, "Humi: N/A");
 
-        /* ADC: 变化超过 20mV 才刷新 (死区, 避免悬空时乱跳刷屏) */
-        if ((disp.adc_mv > last_adc) ? (disp.adc_mv - last_adc >= 20) : (last_adc - disp.adc_mv >= 20))
-        {
-            sprintf(buf, "%u mV", (unsigned)disp.adc_mv);
-            lcd_fill(90, 112, 228, 127, WHITE);
-            lcd_show_string(90, 112, 138, 16, 16, buf, BLUE);
-            last_adc = disp.adc_mv;
-        }
-
-        /* 设备 ID */
-        if ((uint16_t)g_device_id != last_id)
-        {
-            sprintf(buf, "%u", (unsigned)g_device_id);
-            lcd_fill(90, 144, 228, 159, WHITE);
-            lcd_show_string(90, 144, 138, 16, 16, buf, BLUE);
-            last_id = g_device_id;
-        }
-
-        /* 采样周期 */
-        if (g_sample_interval_ms != last_rate)
-        {
-            sprintf(buf, "%u ms", (unsigned)g_sample_interval_ms);
-            lcd_fill(90, 176, 228, 191, WHITE);
-            lcd_show_string(90, 176, 138, 16, 16, buf, BLUE);
-            last_rate = g_sample_interval_ms;
-        }
+        lv_label_set_text_fmt(lbl_adc_big, "%u mV", (unsigned)disp.adc_mv);
+        lv_label_set_text_fmt(lbl_adc_raw, "raw: 0x%04X", (unsigned)disp.adc_raw);
     }
+
+    /* uptime clock: refresh once per second (avoid useless redraw) */
+    uint32_t now = osKernelGetTickCount();
+    if (now - last_sec >= 1000)
+    {
+        last_sec = now;
+        uint32_t el = (now - g_boot_tick) / 1000;
+        lv_label_set_text_fmt(lbl_desk_time, "%02u:%02u:%02u",
+                              (unsigned)(el / 3600), (unsigned)((el % 3600) / 60), (unsigned)(el % 60));
+        lv_label_set_text_fmt(lbl_clock_big, "%02u:%02u:%02u",
+                              (unsigned)(el / 3600), (unsigned)((el % 3600) / 60), (unsigned)(el % 60));
+    }
+
+    lv_timer_handler();    /* LVGL render */
+    osDelay(5);
   }
-  /* USER CODE END StartDisplayTask */
+/* USER CODE END StartDisplayTask */
 }
 
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
-/* 处理一帧完整命令, 组回复帧并通过串口发出 */
+/* handle one complete frame: build reply and send */
 static void proto_handle_cmd(ProtoParser *p, uint8_t *tx_buf)
 {
     uint8_t reply_data[4];
     uint8_t len = 0;
     uint16_t n;
 
-    /* ID 不匹配的帧直接忽略 (一主多从总线上只处理发给自己的帧) */
+    /* ignore frames with unmatched ID (multi-slave bus) */
     if (p->id != g_device_id)
     {
         return;

@@ -30,6 +30,8 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
+#include "touch.h"
+#include "24cxx.h"
 
 /* USER CODE END Includes */
 
@@ -99,6 +101,9 @@ int main(void)
   MX_USART1_UART_Init();
   MX_FSMC_Init();
   /* USER CODE BEGIN 2 */
+  /* 预读触摸校准(调度器启动前做, 24C02 与 SHT30 共用 PB6/PB7 软 I2C, 避免任务竞争) */
+  at24cxx_init();
+  tp_get_adjust_data();
 
   /* USER CODE END 2 */
 
@@ -167,9 +172,13 @@ void SystemClock_Config(void)
 
 /* USER CODE BEGIN 4 */
 /* printf 重定向到串口1 (需要在 Keil 里勾选 Use MicroLIB) */
+extern osMutexId_t uart_tx_mutex;   /* created in freertos.c */
+
 int fputc(int ch, FILE *f)
 {
-    HAL_UART_Transmit(&huart1, (uint8_t *)&ch, 1, 0xFFFF);
+    if (uart_tx_mutex) osMutexAcquire(uart_tx_mutex, osWaitForever);
+    HAL_UART_Transmit(&huart1, (uint8_t *)&ch, 1, 100);
+    if (uart_tx_mutex) osMutexRelease(uart_tx_mutex);
     return ch;
 }
 
