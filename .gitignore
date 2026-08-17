@@ -16,6 +16,9 @@
 *.lst
 Output/
 build/
+MDK-ARM/FreeRTOS_Project/
+MDK-ARM/build_log.txt
+MDK-ARM/EventRecorderStub.scvd
 
 # ===== IDE / 工具缓存 =====
 .vscode/

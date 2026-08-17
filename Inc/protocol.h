@@ -19,6 +19,7 @@
 #define PROTO_CMD_REPORT     0x01        /* 主动上报传感器数据 (上行) */
 #define PROTO_CMD_SET_PARAM  0x02        /* 设置参数 (下行) */
 #define PROTO_CMD_QUERY      0x03        /* 查询设备信息 (下行) */
+#define PROTO_CMD_SET_TIME   0x04        /* 校时 (下行): DATA=YY(2B) MM DD HH MM SS */
 
 /* 参数 ID (CMD 0x02 用) */
 #define PROTO_PARAM_INTERVAL 0x01        /* 采样周期 ms: DATA[1]高字节 DATA[2]低字节 */
